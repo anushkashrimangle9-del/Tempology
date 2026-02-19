@@ -1,8 +1,4 @@
-from django.db.models import Q
 from rest_framework import serializers
-from django.contrib.auth import authenticate
-from rest_framework_simplejwt.tokens import RefreshToken
-from django.conf import settings
 from .models import *
 from django.utils import timezone
 import random
@@ -12,7 +8,7 @@ from django.core.files.base import ContentFile
 import uuid
 import six
 import binascii
-# import imghdr
+import imghdr
 
 # ============ BASE64 IMAGE FIELD ============
 class Base64ImageField(serializers.ImageField):
@@ -36,23 +32,27 @@ class Base64ImageField(serializers.ImageField):
         extension = imghdr.what(file_name, decoded_file)
         return extension or 'jpg'
 
+
 # ============ USER SERIALIZERS ============
 class UserSerializer(serializers.ModelSerializer):
-    profile_image = Base64ImageField(required=False, allow_null=True)
+    profile_image_url = Base64ImageField(required=False, allow_null=True)
 
     class Meta:
         model = User
         fields = [
-            'id', 'full_name', 'email', 'phone_number', 'role',
-            'status', 'is_verified', 'profile_image', 'created_at'
+            'user_id', 'full_name', 'email', 'phone_number', 'role',
+            'status', 'is_verified', 'profile_image_url', 'created_at'
         ]
-        read_only_fields = ['id', 'is_verified', 'created_at']
+        read_only_fields = ['user_id', 'is_verified', 'created_at']
 
-class RegisterSerializer(serializers.Serializer):
-    """Registration serializer"""
+
+
+# ============ REGISTRATION SERIALIZERS ============
+class RegistrationInitSerializer(serializers.Serializer):
+    """Initial registration - collects user data and sends OTPs"""
     full_name = serializers.CharField(max_length=100)
     email = serializers.EmailField()
-    phone_number = serializers.CharField(max_length=10, min_length=10)
+    phone_number = serializers.CharField(max_length=20, min_length=10)
     role = serializers.ChoiceField(choices=User.ROLE_CHOICES)
     password = serializers.CharField(write_only=True, min_length=6)
     confirm_password = serializers.CharField(write_only=True, min_length=6)
@@ -65,14 +65,120 @@ class RegisterSerializer(serializers.Serializer):
         if User.objects.filter(email=data['email']).exists():
             raise serializers.ValidationError({"email": "User with this email already exists"})
 
-        # Check if phone number already exists
+        # Check if phone already exists
         if User.objects.filter(phone_number=data['phone_number']).exists():
             raise serializers.ValidationError({"phone_number": "User with this phone number already exists"})
 
         return data
 
+
+class VerifyEmailOTPSerializer(serializers.Serializer):
+    """Verify email OTP during registration"""
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6)
+    full_name = serializers.CharField(max_length=100, required=False)
+    phone_number = serializers.CharField(max_length=20, min_length=10, required=False)
+    role = serializers.ChoiceField(choices=User.ROLE_CHOICES, required=False)
+    password = serializers.CharField(write_only=True, min_length=6, required=False)
+
+    def validate(self, data):
+        email = data.get('email')
+        otp_value = data.get('otp')
+
+        # Find the OTP
+        try:
+            otp_obj = OTP.objects.filter(
+                email=email,
+                otp_type='email_registration',
+                is_used=False,
+                is_verified=False,
+                expires_at__gt=timezone.now()
+            ).latest('created_at')
+        except OTP.DoesNotExist:
+            raise serializers.ValidationError({"otp": "Email OTP not found, expired, or already used"})
+
+        if otp_obj.otp != otp_value:
+            raise serializers.ValidationError({"otp": "Incorrect email OTP"})
+
+        data['otp_instance'] = otp_obj
+        return data
+
+
+class VerifyPhoneOTPSerializer(serializers.Serializer):
+    """Verify phone OTP during registration"""
+    phone_number = serializers.CharField(max_length=20, min_length=10)
+    otp = serializers.CharField(max_length=6)
+    email = serializers.EmailField(required=False)  # Optional, for context
+
+    def validate(self, data):
+        phone = data.get('phone_number')
+        otp_value = data.get('otp')
+
+        # Find the OTP
+        try:
+            otp_obj = OTP.objects.filter(
+                phone_number=phone,
+                otp_type='phone_registration',
+                is_used=False,
+                is_verified=False,
+                expires_at__gt=timezone.now()
+            ).latest('created_at')
+        except OTP.DoesNotExist:
+            raise serializers.ValidationError({"otp": "Phone OTP not found, expired, or already used"})
+
+        if otp_obj.otp != otp_value:
+            raise serializers.ValidationError({"otp": "Incorrect phone OTP"})
+
+        data['otp_instance'] = otp_obj
+        return data
+
+
+class CompleteRegistrationSerializer(serializers.Serializer):
+    """Complete registration after both OTPs are verified"""
+    email = serializers.EmailField()
+    phone_number = serializers.CharField(max_length=20, min_length=10)
+    full_name = serializers.CharField(max_length=100)
+    role = serializers.ChoiceField(choices=User.ROLE_CHOICES)
+    password = serializers.CharField(write_only=True, min_length=6)
+
+    def validate(self, data):
+        email = data.get('email')
+        phone = data.get('phone_number')
+
+        # Check if user already exists (shouldn't, but double-check)
+        if User.objects.filter(email=email).exists():
+            raise serializers.ValidationError({"email": "User with this email already exists"})
+
+        if User.objects.filter(phone_number=phone).exists():
+            raise serializers.ValidationError({"phone_number": "User with this phone number already exists"})
+
+        # Verify both OTPs are verified
+        email_otp_verified = OTP.objects.filter(
+            email=email,
+            otp_type='email_registration',
+            is_verified=True,
+            is_used=False  # Not used yet, just verified
+        ).exists()
+
+        phone_otp_verified = OTP.objects.filter(
+            phone_number=phone,
+            otp_type='phone_registration',
+            is_verified=True,
+            is_used=False
+        ).exists()
+
+        if not email_otp_verified:
+            raise serializers.ValidationError({"email": "Email not verified. Please verify email OTP first."})
+
+        if not phone_otp_verified:
+            raise serializers.ValidationError({"phone_number": "Phone not verified. Please verify phone OTP first."})
+
+        return data
+
+
+# ============ LOGIN SERIALIZERS (Email only) ============
 class EmailLoginSerializer(serializers.Serializer):
-    """Login with email and password"""
+    """Login with email and password (NO VERIFICATION REQUIRED)"""
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
 
@@ -83,54 +189,96 @@ class EmailLoginSerializer(serializers.Serializer):
         if not email or not password:
             raise serializers.ValidationError("Both email and password are required")
 
-        # Find user by email
         try:
             user = User.objects.get(email=email)
         except User.DoesNotExist:
             raise serializers.ValidationError("No account found with this email")
 
-        # Check password
         if not user.check_password(password):
             raise serializers.ValidationError("Invalid password")
 
-        # Check if user is active
         if not user.is_active or user.status != 'active':
             raise serializers.ValidationError("Account is not active")
 
         data['user'] = user
         return data
 
-class PhoneLoginSerializer(serializers.Serializer):
-    """Login with phone and password"""
-    phone_number = serializers.CharField(max_length=10, min_length=10)
-    password = serializers.CharField(write_only=True)
+
+# ============ OTP SERIALIZERS ============
+class SendOTPSerializer(serializers.Serializer):
+    """Send OTP for registration (email or phone)"""
+    contact = serializers.CharField(max_length=100)
+    contact_type = serializers.ChoiceField(choices=['email', 'phone'])
+    otp_type = serializers.ChoiceField(choices=['email_registration', 'phone_registration', 'password_reset'])
 
     def validate(self, data):
-        phone_number = data.get('phone_number')
-        password = data.get('password')
+        contact = data.get('contact')
+        contact_type = data.get('contact_type')
+        otp_type = data.get('otp_type')
 
-        if not phone_number or not password:
-            raise serializers.ValidationError("Both phone number and password are required")
+        # Validate format
+        if contact_type == 'email':
+            if '@' not in contact or '.' not in contact:
+                raise serializers.ValidationError({"contact": "Invalid email format"})
 
-        # Find user by phone number
-        try:
-            user = User.objects.get(phone_number=phone_number)
-        except User.DoesNotExist:
-            raise serializers.ValidationError("No account found with this phone number")
+            # For registration, check if email already exists
+            if otp_type == 'email_registration':
+                if User.objects.filter(email=contact).exists():
+                    raise serializers.ValidationError({"contact": "Email already registered"})
 
-        # Check password
-        if not user.check_password(password):
-            raise serializers.ValidationError("Invalid password")
+        elif contact_type == 'phone':
+            if not contact.isdigit() or len(contact) < 10 or len(contact) > 15:
+                raise serializers.ValidationError({"contact": "Invalid phone number format"})
 
-        # Check if user is active
-        if not user.is_active or user.status != 'active':
-            raise serializers.ValidationError("Account is not active")
+            # For registration, check if phone already exists
+            if otp_type == 'phone_registration':
+                if User.objects.filter(phone_number=contact).exists():
+                    raise serializers.ValidationError({"contact": "Phone number already registered"})
 
-        data['user'] = user
         return data
 
+
+class VerifyOTPSerializer(serializers.Serializer):
+    """Verify OTP (marks as verified, not used)"""
+    contact = serializers.CharField(max_length=100)
+    contact_type = serializers.ChoiceField(choices=['email', 'phone'])
+    otp = serializers.CharField(max_length=6)
+    otp_type = serializers.ChoiceField(choices=['email_registration', 'phone_registration', 'password_reset'])
+
+    def validate(self, data):
+        contact = data.get('contact')
+        contact_type = data.get('contact_type')
+        otp_value = data.get('otp')
+        otp_type = data.get('otp_type')
+
+        # Build filter
+        filter_kwargs = {
+            'otp_type': otp_type,
+            'is_used': False,
+            'is_verified': False,
+            'expires_at__gt': timezone.now()
+        }
+
+        if contact_type == 'email':
+            filter_kwargs['email'] = contact
+        else:
+            filter_kwargs['phone_number'] = contact
+
+        try:
+            otp_obj = OTP.objects.filter(**filter_kwargs).latest('created_at')
+        except OTP.DoesNotExist:
+            raise serializers.ValidationError({"otp": "OTP not found, expired, or already used"})
+
+        if otp_obj.otp != otp_value:
+            raise serializers.ValidationError({"otp": "Incorrect OTP"})
+
+        data['otp_instance'] = otp_obj
+        return data
+
+
+# ============ PASSWORD MANAGEMENT SERIALIZERS ============
 class ForgotPasswordSerializer(serializers.Serializer):
-    """Forgot password serializer"""
+    """Forgot password - send OTP to email"""
     email = serializers.EmailField()
 
     def validate(self, data):
@@ -144,10 +292,11 @@ class ForgotPasswordSerializer(serializers.Serializer):
         data['user'] = user
         return data
 
+
 class ResetPasswordSerializer(serializers.Serializer):
-    """Reset password serializer"""
+    """Reset password with OTP"""
     email = serializers.EmailField()
-    otp = serializers.CharField(max_length=4)
+    otp = serializers.CharField(max_length=6)
     new_password = serializers.CharField(write_only=True, min_length=6)
     confirm_password = serializers.CharField(write_only=True, min_length=6)
 
@@ -167,7 +316,6 @@ class ResetPasswordSerializer(serializers.Serializer):
         try:
             otp_obj = OTP.objects.filter(
                 email=email,
-                otp=data['otp'],
                 otp_type='password_reset',
                 is_used=False,
                 expires_at__gt=timezone.now()
@@ -175,9 +323,16 @@ class ResetPasswordSerializer(serializers.Serializer):
         except OTP.DoesNotExist:
             raise serializers.ValidationError({"otp": "Invalid or expired OTP"})
 
+        if otp_obj.otp != data['otp']:
+            raise serializers.ValidationError({"otp": "Incorrect OTP"})
+
         data['user'] = user
         data['otp_instance'] = otp_obj
         return data
+
+
+# ... rest of your serializers (UserSerializer, etc.) remain the same
+
 
 class ChangePasswordSerializer(serializers.Serializer):
     """Change password serializer"""
@@ -195,12 +350,13 @@ class ChangePasswordSerializer(serializers.Serializer):
 
         return data
 
+
 class ProfileUpdateSerializer(serializers.ModelSerializer):
-    profile_image = Base64ImageField(required=False, allow_null=True)
+    profile_image_url = Base64ImageField(required=False, allow_null=True)
 
     class Meta:
         model = User
-        fields = ['full_name', 'email', 'phone_number', 'profile_image']
+        fields = ['full_name', 'email', 'phone_number', 'profile_image_url']
 
     def validate_email(self, value):
         if value and value != self.instance.email:
@@ -214,46 +370,21 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("A user with this phone number already exists.")
         return value
 
-# ============ OTP SERIALIZERS ============
-class SendOTPSerializer(serializers.Serializer):
-    """Send OTP for email verification or password reset"""
-    email = serializers.EmailField()
-    otp_type = serializers.ChoiceField(choices=['email_verification', 'password_reset'])
 
-class VerifyOTPSerializer(serializers.Serializer):
-    """Verify OTP"""
-    email = serializers.EmailField()
-    otp = serializers.CharField(max_length=4)
-    otp_type = serializers.ChoiceField(choices=['email_verification', 'password_reset'])
 
-    def validate(self, data):
-        try:
-            otp_obj = OTP.objects.filter(
-                email=data['email'],
-                otp_type=data['otp_type'],
-                is_used=False,
-                expires_at__gt=timezone.now()
-            ).latest('created_at')
-        except OTP.DoesNotExist:
-            raise serializers.ValidationError({"otp": "OTP not found, expired, or already used"})
-
-        if otp_obj.otp != data['otp']:
-            raise serializers.ValidationError({"otp": "Incorrect OTP"})
-
-        data['otp_instance'] = otp_obj
-        return data
 
 # ============ KYC DOCUMENT SERIALIZERS ============
 class KYCDocumentSerializer(serializers.ModelSerializer):
-    file = Base64ImageField(required=True)
+    file_url = Base64ImageField(required=True)
 
     class Meta:
         model = KYCDocument
         fields = [
-            'doc_id', 'document_type', 'document_number', 'file',
+            'doc_id', 'document_type', 'document_number', 'file_url',
             'expiry_date', 'verification_status', 'rejection_reason', 'uploaded_at'
         ]
         read_only_fields = ['doc_id', 'verification_status', 'rejection_reason', 'uploaded_at']
+
 
 # ============ ADDRESS SERIALIZERS ============
 class SavedAddressSerializer(serializers.ModelSerializer):
@@ -261,6 +392,7 @@ class SavedAddressSerializer(serializers.ModelSerializer):
         model = SavedAddress
         fields = '__all__'
         read_only_fields = ['address_id']
+
 
 # ============ CORPORATE PROFILE SERIALIZERS ============
 class CorporateProfileSerializer(serializers.ModelSerializer):
@@ -271,14 +403,16 @@ class CorporateProfileSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['corporate_id']
 
+
 # ============ VEHICLE SERIALIZERS ============
 class VehiclePhotoSerializer(serializers.ModelSerializer):
-    photo = Base64ImageField(required=True)
+    photo_url = Base64ImageField(required=True)
 
     class Meta:
         model = VehiclePhoto
-        fields = ['photo_id', 'side', 'photo', 'uploaded_at']
+        fields = ['photo_id', 'side', 'photo_url', 'uploaded_at']
         read_only_fields = ['photo_id', 'uploaded_at']
+
 
 class VehicleSerializer(serializers.ModelSerializer):
     photos = VehiclePhotoSerializer(many=True, read_only=True)
@@ -288,6 +422,7 @@ class VehicleSerializer(serializers.ModelSerializer):
         model = Vehicle
         fields = '__all__'
         read_only_fields = ['vehicle_id', 'owner', 'created_at', 'verification_status']
+
 
 class VehicleCreateSerializer(serializers.ModelSerializer):
     photos = VehiclePhotoSerializer(many=True, required=False)
@@ -308,6 +443,7 @@ class VehicleCreateSerializer(serializers.ModelSerializer):
 
         return vehicle
 
+
 # ============ VEHICLE SCHEDULE SERIALIZERS ============
 class VehicleScheduleSerializer(serializers.ModelSerializer):
     vehicle_details = VehicleSerializer(source='vehicle', read_only=True)
@@ -316,6 +452,7 @@ class VehicleScheduleSerializer(serializers.ModelSerializer):
         model = VehicleSchedule
         fields = '__all__'
         read_only_fields = ['schedule_id']
+
 
 # ============ LOAD SERIALIZERS ============
 class LoadSerializer(serializers.ModelSerializer):
@@ -329,6 +466,7 @@ class LoadSerializer(serializers.ModelSerializer):
 
     def get_bids_count(self, obj):
         return obj.bids.count()
+
 
 class LoadCreateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -345,6 +483,7 @@ class LoadCreateSerializer(serializers.ModelSerializer):
         if value < timezone.now():
             raise serializers.ValidationError("Pickup date cannot be in the past")
         return value
+
 
 # ============ BID SERIALIZERS ============
 class BidSerializer(serializers.ModelSerializer):
@@ -363,6 +502,7 @@ class BidSerializer(serializers.ModelSerializer):
             'capacity_ton': obj.vehicle.capacity_ton
         }
 
+
 class BidCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Bid
@@ -373,6 +513,7 @@ class BidCreateSerializer(serializers.ModelSerializer):
         if load.status != 'open':
             raise serializers.ValidationError("This load is not accepting bids")
         return data
+
 
 # ============ BOOKING SERIALIZERS ============
 class BookingSerializer(serializers.ModelSerializer):
@@ -385,10 +526,12 @@ class BookingSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['booking_id', 'created_at']
 
+
 class BookingUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
-        fields = ['booking_status', 'driver', 'eway_bill_no', 'invoice', 'bilty']
+        fields = ['booking_status', 'driver', 'eway_bill_no', 'invoice_url', 'bilty_url']
+
 
 # ============ TRACKING SERIALIZERS ============
 class TrackingSerializer(serializers.ModelSerializer):
@@ -397,10 +540,12 @@ class TrackingSerializer(serializers.ModelSerializer):
         fields = ['tracking_id', 'latitude', 'longitude', 'current_location_text', 'timestamp']
         read_only_fields = ['tracking_id', 'timestamp']
 
+
 class TrackingCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShipmentTracking
         fields = ['booking', 'latitude', 'longitude', 'current_location_text']
+
 
 # ============ WALLET SERIALIZERS ============
 class WalletSerializer(serializers.ModelSerializer):
@@ -409,11 +554,13 @@ class WalletSerializer(serializers.ModelSerializer):
         fields = ['wallet_id', 'balance', 'currency', 'updated_at']
         read_only_fields = ['wallet_id', 'balance', 'updated_at']
 
+
 class WalletTransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = WalletTransaction
         fields = '__all__'
         read_only_fields = ['transaction_id', 'created_at']
+
 
 # ============ PAYMENT SERIALIZERS ============
 class PaymentSerializer(serializers.ModelSerializer):
@@ -425,6 +572,7 @@ class PaymentSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['payment_id', 'created_at', 'released_at']
 
+
 # ============ RATING SERIALIZERS ============
 class RatingSerializer(serializers.ModelSerializer):
     reviewer_name = serializers.CharField(source='reviewer.full_name', read_only=True)
@@ -434,6 +582,7 @@ class RatingSerializer(serializers.ModelSerializer):
         model = Rating
         fields = '__all__'
         read_only_fields = ['rating_id', 'reviewer', 'created_at']
+
 
 class RatingCreateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -445,6 +594,7 @@ class RatingCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Score must be between 1 and 5")
         return value
 
+
 # ============ DISPUTE SERIALIZERS ============
 class DisputeSerializer(serializers.ModelSerializer):
     raised_by_name = serializers.CharField(source='raised_by.full_name', read_only=True)
@@ -454,10 +604,12 @@ class DisputeSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['dispute_id', 'created_at']
 
+
 class DisputeCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Dispute
-        fields = ['booking', 'reason_category', 'description', 'evidence']
+        fields = ['booking', 'reason_category', 'description', 'evidence_url']
+
 
 # ============ NOTIFICATION SERIALIZERS ============
 class NotificationSerializer(serializers.ModelSerializer):
@@ -465,6 +617,7 @@ class NotificationSerializer(serializers.ModelSerializer):
         model = Notification
         fields = '__all__'
         read_only_fields = ['notification_id', 'created_at']
+
 
 # ============ ADMIN LOG SERIALIZERS ============
 class AdminLogSerializer(serializers.ModelSerializer):

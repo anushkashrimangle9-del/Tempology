@@ -3,25 +3,25 @@ from . import views
 
 urlpatterns = [
     # Authentication URLs
-    path('auth/register/', views.register_view, name='register'),
-    path('auth/login/email/', views.login_with_email_view, name='login-email'),
-    path('auth/login/phone/', views.login_with_phone_view, name='login-phone'),
-    path('auth/logout/', views.logout_view, name='logout'),
-    path('auth/refresh/', views.refresh_token_view, name='refresh-token'),
+    path('auth/register/init/', views.register_init_view, name='register-init'),
+    path('auth/register/send-otp/', views.send_registration_otp_view, name='send-reg-otp'),
+    path('auth/register/verify-otp/', views.verify_registration_otp_view, name='verify-reg-otp'),
+    path('auth/register/complete/', views.complete_registration_view, name='complete-registration'),
 
-    # OTP URLs
-    path('auth/otp/send/', views.send_otp_view, name='send-otp'),
-    path('auth/otp/verify/', views.verify_otp_view, name='verify-otp'),
+    # ============ LOGIN (Email only, no OTP) ============
+    path('auth/login/', views.login_with_email_view, name='login'),
 
-    # Password Management
+    # ============ PASSWORD MANAGEMENT ============
     path('auth/password/forgot/', views.forgot_password_view, name='forgot-password'),
     path('auth/password/reset/', views.reset_password_view, name='reset-password'),
     path('auth/password/change/', views.change_password_view, name='change-password'),
 
+    path('auth/logout/', views.logout_view, name='logout'),
+    path('auth/refresh/', views.refresh_token_view, name='refresh-token'),
+
     # Profile
     path('profile/', views.profile_view, name='profile'),
     path('dashboard/', views.dashboard_view, name='dashboard'),
-
 
     # ============ KYC ============
     path('kyc/my-documents/', views.my_kyc_documents, name='my_kyc_documents'),
@@ -37,15 +37,18 @@ urlpatterns = [
     # ============ VEHICLES ============
     path('vehicles/', views.my_vehicles, name='my_vehicles'),
     path('vehicles/<int:vehicle_id>/', views.vehicle_detail, name='vehicle_detail'),
+    path('vehicles/<int:vehicle_id>/availability/', views.vehicle_availability, name='vehicle_availability'),
 
     # ============ VEHICLE SCHEDULES ============
     path('schedules/', views.my_schedules, name='my_schedules'),
     path('schedules/<int:schedule_id>/', views.schedule_detail, name='schedule_detail'),
+    path('schedules/return-trip/', views.create_return_trip_schedule, name='create_return_trip'),
 
     # ============ LOADS ============
     path('loads/', views.my_loads, name='my_loads'),
     path('loads/<int:load_id>/', views.load_detail, name='load_detail'),
     path('loads/search/', views.search_loads, name='search_loads'),
+    path('vehicles/search/', views.search_available_vehicles, name='search_vehicles'),
 
     # ============ BIDS ============
     path('bids/', views.my_bids, name='my_bids'),
@@ -55,6 +58,7 @@ urlpatterns = [
     # ============ BOOKINGS ============
     path('bookings/', views.my_bookings, name='my_bookings'),
     path('bookings/<int:booking_id>/', views.booking_detail, name='booking_detail'),
+    path('bookings/<int:booking_id>/upload-document/', views.upload_booking_document, name='upload_booking_document'),
     path('bookings/<int:booking_id>/verify-otp/', views.verify_booking_otp, name='verify_booking_otp'),
 
     # ============ TRACKING ============
@@ -64,6 +68,10 @@ urlpatterns = [
     # ============ WALLET ============
     path('wallet/', views.my_wallet, name='my_wallet'),
     path('wallet/transactions/', views.wallet_transactions, name='wallet_transactions'),
+    path('wallet/add/', views.add_wallet_money, name='add_wallet_money'),
+
+    # ============ PAYMENTS ============
+    path('payments/', views.my_payments, name='my_payments'),
 
     # ============ RATINGS ============
     path('ratings/', views.my_ratings, name='my_ratings'),
@@ -76,13 +84,18 @@ urlpatterns = [
     path('notifications/<int:notification_id>/read/', views.mark_notification_read, name='mark_notification_read'),
 
     # ============ DASHBOARD ============
-    path('dashboard/', views.dashboard_summary, name='dashboard_summary'),
+    path('dashboard/', views.dashboard_view, name='dashboard_summary'),
 
     # ============ ADMIN ============
     path('admin/users/', views.admin_users_list, name='admin_users_list'),
     path('admin/users/<int:user_id>/', views.admin_user_detail, name='admin_user_detail'),
+    path('admin/users/<int:user_id>/block/', views.admin_block_user, name='admin_block_user'),
     path('admin/kyc/pending/', views.admin_pending_kyc, name='admin_pending_kyc'),
     path('admin/kyc/<int:doc_id>/verify/', views.admin_verify_kyc, name='admin_verify_kyc'),
     path('admin/vehicles/pending/', views.admin_pending_vehicles, name='admin_pending_vehicles'),
     path('admin/vehicles/<int:vehicle_id>/verify/', views.admin_verify_vehicle, name='admin_verify_vehicle'),
+    path('admin/disputes/', views.admin_disputes, name='admin_disputes'),
+    path('admin/disputes/<int:dispute_id>/', views.admin_update_dispute, name='admin_update_dispute'),
+    path('admin/reports/', views.admin_reports, name='admin_reports'),
+    path('admin/logs/', views.admin_logs, name='admin_logs'),
 ]

@@ -7,9 +7,12 @@ from django.utils import timezone
 
 
 # ============ FILE UPLOAD PATHS ============
+
+# ============ FILE UPLOAD PATHS ============
 def user_profile_upload_path(instance, filename):
     ext = filename.split('.')[-1]
-    return os.path.join('profile_pics', f"user_{instance.id}", f"profile.{ext}")
+    # FIXED: Changed instance.id to instance.user_id
+    return os.path.join('profile_pics', f"user_{instance.user_id}", f"profile.{ext}")
 
 
 def vehicle_photo_upload_path(instance, filename):
@@ -19,7 +22,13 @@ def vehicle_photo_upload_path(instance, filename):
 
 def kyc_document_upload_path(instance, filename):
     ext = filename.split('.')[-1]
-    return os.path.join('kyc_docs', f"user_{instance.user.id}", f"{instance.document_type}.{ext}")
+    # FIXED: Changed instance.user.id to instance.user.user_id for consistency
+    return os.path.join('kyc_docs', f"user_{instance.user.user_id}", f"{instance.document_type}.{ext}")
+
+
+def document_upload_path(instance, filename):
+    ext = filename.split('.')[-1]
+    return os.path.join('booking_docs', f"booking_{instance.booking_id}", filename)
 
 
 # ============ USER MANAGER ============
@@ -94,19 +103,19 @@ class User(AbstractBaseUser, PermissionsMixin):
         ('banned', 'Banned'),
     ]
 
-    id = models.AutoField(primary_key=True)
+    user_id = models.AutoField(primary_key=True, db_column='user_id')
     full_name = models.CharField(max_length=100)
     email = models.EmailField(unique=True, null=True, blank=True)
     phone_number = models.CharField(
-        max_length=10,
+        max_length=20,
         unique=True,
-        validators=[RegexValidator(r'^\d{10}$', 'Enter valid 10-digit number')]
+        validators=[RegexValidator(r'^\d{10,20}$', 'Enter valid phone number')]
     )
-    password = models.CharField(max_length=255)  # This is the standard Django password field
+    password = models.CharField(max_length=255)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='consignee')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     is_verified = models.BooleanField(default=False)
-    profile_image = models.ImageField(upload_to=user_profile_upload_path, null=True, blank=True)
+    profile_image_url = models.ImageField(upload_to=user_profile_upload_path, null=True, blank=True)
 
     # Auth fields
     is_active = models.BooleanField(default=True)
@@ -119,8 +128,8 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     objects = UserManager()
 
-    USERNAME_FIELD = 'email'  # Changed to email for email login
-    REQUIRED_FIELDS = ['full_name', 'phone_number', 'role']  # These are required when creating superuser
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['full_name', 'phone_number', 'role']
 
     class Meta:
         db_table = 'users'
@@ -132,31 +141,37 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return f"{self.full_name} ({self.email or self.phone_number})"
 
+    # ADDED: Property to maintain compatibility with code that expects 'id'
+    @property
+    def id(self):
+        """Compatibility property for code that expects 'id' field"""
+        return self.user_id
 
+
+# ============ OTP MODEL ============
 # ============ OTP MODEL ============
 class OTP(models.Model):
     OTP_TYPES = [
-        ('registration', 'Registration'),
+        ('email_registration', 'Email Registration'),
+        ('phone_registration', 'Phone Registration'),
         ('password_reset', 'Password Reset'),
-        ('email_verification', 'Email Verification'),
-        ('phone_verification', 'Phone Verification'),
-        ('login', 'Login'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    phone_number = models.CharField(max_length=10, null=True, blank=True)
+    phone_number = models.CharField(max_length=20, null=True, blank=True)
     email = models.EmailField(null=True, blank=True)
-    otp = models.CharField(max_length=4)
+    otp = models.CharField(max_length=6)
     otp_type = models.CharField(max_length=20, choices=OTP_TYPES)
     is_used = models.BooleanField(default=False)
+    is_verified = models.BooleanField(default=False)  # Track if OTP was verified
     expires_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'otp_verifications'
         indexes = [
-            models.Index(fields=['phone_number', 'otp_type', 'is_used']),
-            models.Index(fields=['email', 'otp_type', 'is_used']),
+            models.Index(fields=['phone_number', 'otp_type', 'is_used', 'is_verified']),
+            models.Index(fields=['email', 'otp_type', 'is_used', 'is_verified']),
         ]
 
     def is_expired(self):
@@ -165,11 +180,10 @@ class OTP(models.Model):
     def __str__(self):
         return f"{self.email or self.phone_number} - {self.otp}"
 
-
 # ============ CORPORATE PROFILE ============
 class CorporateProfile(models.Model):
     corporate_id = models.AutoField(primary_key=True)
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='corporate_profile')
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='corporate_profile', db_column='user_id')
     company_name = models.CharField(max_length=150)
     gst_number = models.CharField(max_length=20, unique=True, null=True, blank=True)
     contact_person = models.CharField(max_length=100, null=True, blank=True)
@@ -200,10 +214,10 @@ class KYCDocument(models.Model):
     ]
 
     doc_id = models.AutoField(primary_key=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='kyc_documents')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='kyc_documents', db_column='user_id')
     document_type = models.CharField(max_length=20, choices=DOCUMENT_TYPES)
     document_number = models.CharField(max_length=50)
-    file = models.FileField(upload_to=kyc_document_upload_path)
+    file_url = models.FileField(upload_to=kyc_document_upload_path)
     expiry_date = models.DateField(null=True, blank=True)
     verification_status = models.CharField(max_length=20, choices=VERIFICATION_STATUS, default='pending')
     rejection_reason = models.CharField(max_length=255, null=True, blank=True)
@@ -216,7 +230,7 @@ class KYCDocument(models.Model):
 # ============ SAVED ADDRESSES ============
 class SavedAddress(models.Model):
     address_id = models.AutoField(primary_key=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='addresses')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='addresses', db_column='user_id')
     address_label = models.CharField(max_length=50, null=True, blank=True)
     street_address = models.TextField()
     city = models.CharField(max_length=100)
@@ -246,7 +260,7 @@ class Vehicle(models.Model):
     ]
 
     vehicle_id = models.AutoField(primary_key=True)
-    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='vehicles',
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='vehicles', db_column='owner_id',
                               limit_choices_to={'role__in': ['truck_owner', 'transporter']})
     vehicle_type = models.CharField(max_length=20, choices=VEHICLE_TYPES)
     manufacturer = models.CharField(max_length=100, null=True, blank=True)
@@ -280,8 +294,8 @@ class VehiclePhoto(models.Model):
     ]
 
     photo_id = models.AutoField(primary_key=True)
-    vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, related_name='photos')
-    photo = models.ImageField(upload_to=vehicle_photo_upload_path)
+    vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, related_name='photos', db_column='vehicle_id')
+    photo_url = models.ImageField(upload_to=vehicle_photo_upload_path)
     side = models.CharField(max_length=20, choices=SIDES)
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
@@ -305,7 +319,7 @@ class VehicleSchedule(models.Model):
     ]
 
     schedule_id = models.AutoField(primary_key=True)
-    vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, related_name='schedules')
+    vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, related_name='schedules', db_column='vehicle_id')
     start_location = models.CharField(max_length=255)
     end_location = models.CharField(max_length=255)
     start_lat = models.DecimalField(max_digits=10, decimal_places=8, null=True, blank=True)
@@ -346,7 +360,7 @@ class Load(models.Model):
     ]
 
     load_id = models.AutoField(primary_key=True)
-    consignee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='loads',
+    consignee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='loads', db_column='consignee_id',
                                   limit_choices_to={'role__in': ['consignee', 'corporate']})
 
     # Pickup
@@ -388,9 +402,9 @@ class Bid(models.Model):
     ]
 
     bid_id = models.AutoField(primary_key=True)
-    load = models.ForeignKey(Load, on_delete=models.CASCADE, related_name='bids')
-    transporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bids')
-    vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE)
+    load = models.ForeignKey(Load, on_delete=models.CASCADE, related_name='bids', db_column='load_id')
+    transporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bids', db_column='transporter_id')
+    vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, db_column='vehicle_id')
     bid_amount = models.DecimalField(max_digits=15, decimal_places=2)
     bid_message = models.TextField(null=True, blank=True)
     bid_status = models.CharField(max_length=20, choices=BID_STATUS, default='pending')
@@ -415,11 +429,11 @@ class Booking(models.Model):
     ]
 
     booking_id = models.AutoField(primary_key=True)
-    load = models.OneToOneField(Load, on_delete=models.CASCADE, related_name='booking')
-    consignee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bookings_as_consignee')
-    transporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bookings_as_transporter')
-    vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE)
-    driver = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='assigned_bookings',
+    load = models.OneToOneField(Load, on_delete=models.CASCADE, related_name='booking', db_column='load_id')
+    consignee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bookings_as_consignee', db_column='consignee_id')
+    transporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bookings_as_transporter', db_column='transporter_id')
+    vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, db_column='vehicle_id')
+    driver = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='assigned_bookings', db_column='driver_id',
                                limit_choices_to={'role': 'driver'})
 
     agreed_price = models.DecimalField(max_digits=15, decimal_places=2)
@@ -433,8 +447,8 @@ class Booking(models.Model):
 
     # Documents
     eway_bill_no = models.CharField(max_length=50, null=True, blank=True)
-    invoice = models.CharField(max_length=255, null=True, blank=True)
-    bilty = models.CharField(max_length=255, null=True, blank=True)
+    invoice_url = models.CharField(max_length=255, null=True, blank=True)
+    bilty_url = models.CharField(max_length=255, null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -446,7 +460,7 @@ class Booking(models.Model):
 # ============ SHIPMENT TRACKING ============
 class ShipmentTracking(models.Model):
     tracking_id = models.BigAutoField(primary_key=True)
-    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='tracking_updates')
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='tracking_updates', db_column='booking_id')
     latitude = models.DecimalField(max_digits=10, decimal_places=8)
     longitude = models.DecimalField(max_digits=10, decimal_places=8)
     current_location_text = models.CharField(max_length=255, null=True, blank=True)
@@ -460,7 +474,7 @@ class ShipmentTracking(models.Model):
 # ============ WALLET MODEL ============
 class Wallet(models.Model):
     wallet_id = models.AutoField(primary_key=True)
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='wallet')
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='wallet', db_column='user_id')
     balance = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
     currency = models.CharField(max_length=3, default='INR')
     updated_at = models.DateTimeField(auto_now=True)
@@ -485,7 +499,7 @@ class WalletTransaction(models.Model):
     ]
 
     transaction_id = models.AutoField(primary_key=True)
-    wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, related_name='transactions')
+    wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, related_name='transactions', db_column='wallet_id')
     amount = models.DecimalField(max_digits=15, decimal_places=2)
     transaction_type = models.CharField(max_length=10, choices=TRANSACTION_TYPES)
     reference_type = models.CharField(max_length=20, choices=REFERENCE_TYPES)
@@ -516,9 +530,9 @@ class Payment(models.Model):
     ]
 
     payment_id = models.AutoField(primary_key=True)
-    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='payments')
-    payer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payments_made')
-    payee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payments_received')
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='payments', db_column='booking_id')
+    payer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payments_made', db_column='payer_id')
+    payee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payments_received', db_column='payee_id')
     amount = models.DecimalField(max_digits=15, decimal_places=2)
 
     payment_gateway = models.CharField(max_length=20, choices=PAYMENT_GATEWAYS)
@@ -539,9 +553,9 @@ class Payment(models.Model):
 # ============ RATING MODEL ============
 class Rating(models.Model):
     rating_id = models.AutoField(primary_key=True)
-    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='ratings')
-    reviewer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ratings_given')
-    reviewee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ratings_received')
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='ratings', db_column='booking_id')
+    reviewer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ratings_given', db_column='reviewer_id')
+    reviewee = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ratings_received', db_column='reviewee_id')
     score = models.IntegerField()
     comment = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -569,11 +583,11 @@ class Dispute(models.Model):
     ]
 
     dispute_id = models.AutoField(primary_key=True)
-    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='disputes')
-    raised_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='disputes_raised')
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='disputes', db_column='booking_id')
+    raised_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='disputes_raised', db_column='raised_by')
     reason_category = models.CharField(max_length=20, choices=REASON_CATEGORIES)
     description = models.TextField()
-    evidence = models.CharField(max_length=255, null=True, blank=True)
+    evidence_url = models.CharField(max_length=255, null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='open')
     admin_notes = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -592,7 +606,7 @@ class Notification(models.Model):
     ]
 
     notification_id = models.BigAutoField(primary_key=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications', db_column='user_id')
     title = models.CharField(max_length=100, null=True, blank=True)
     message = models.TextField(null=True, blank=True)
     is_read = models.BooleanField(default=False)
@@ -607,7 +621,7 @@ class Notification(models.Model):
 # ============ ADMIN LOG MODEL ============
 class AdminLog(models.Model):
     log_id = models.AutoField(primary_key=True)
-    admin_user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='admin_logs')
+    admin_user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='admin_logs', db_column='admin_user_id')
     action_type = models.CharField(max_length=50)
     target_id = models.IntegerField(null=True, blank=True)
     details = models.TextField(null=True, blank=True)
